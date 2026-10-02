@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"sort"
 	"strconv"
@@ -261,10 +262,15 @@ func (p *PIIMaskingRegexPolicy) maskPIIFromContent(content string, piiEntities m
 
 	// First pass: find all matches without replacing to avoid nested replacements
 	allMatches := make(map[string]string) // original -> placeholder
+	entityHits := make(map[string]int)    // entity name -> occurrences, for debug logging
 	for key, pattern := range piiEntities {
 		matches := pattern.FindAllString(maskedContent, -1)
 		for _, match := range matches {
-			if _, exists := allMatches[match]; !exists && !placeholderPattern.MatchString(match) {
+			if placeholderPattern.MatchString(match) {
+				continue
+			}
+			entityHits[key]++
+			if _, exists := allMatches[match]; !exists {
 				// Generate unique placeholder like [EMAIL_0000]
 				placeholder := fmt.Sprintf("[%s_%04x]", key, counter)
 				allMatches[match] = placeholder
@@ -283,6 +289,8 @@ func (p *PIIMaskingRegexPolicy) maskPIIFromContent(content string, piiEntities m
 	for _, original := range originals {
 		maskedContent = strings.ReplaceAll(maskedContent, original, allMatches[original])
 	}
+
+	p.logPIIDetection("mask", entityHits)
 
 	// Store PII mappings in metadata for response restoration
 	if len(maskedPIIEntities) > 0 {
@@ -303,20 +311,46 @@ func (p *PIIMaskingRegexPolicy) redactPIIFromContent(content string, piiEntities
 	}
 
 	maskedContent := content
-	foundAndMasked := false
+	entityHits := make(map[string]int) // entity name -> occurrences, for debug logging
 
-	for _, pattern := range piiEntities {
-		if pattern.MatchString(maskedContent) {
-			foundAndMasked = true
+	for key, pattern := range piiEntities {
+		if n := len(pattern.FindAllStringIndex(maskedContent, -1)); n > 0 {
+			entityHits[key] = n
 			maskedContent = pattern.ReplaceAllString(maskedContent, "*****")
 		}
 	}
 
-	if foundAndMasked {
+	p.logPIIDetection("redact", entityHits)
+
+	if len(entityHits) > 0 {
 		return maskedContent
 	}
 
 	return ""
+}
+
+// logPIIDetection emits a debug log describing which PII entities matched.
+// Only entity names (from policy config) and counts are logged — never the
+// matched values, which are the PII this policy exists to keep out of logs.
+func (p *PIIMaskingRegexPolicy) logPIIDetection(action string, entityHits map[string]int) {
+	if !slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+		return
+	}
+	total := 0
+	for _, n := range entityHits {
+		total += n
+	}
+	if total == 0 {
+		slog.Debug("PIIMaskingRegex: no PII detected",
+			"action", action,
+			"jsonPath", p.params.JsonPath)
+		return
+	}
+	slog.Debug("PIIMaskingRegex: PII detected",
+		"action", action,
+		"jsonPath", p.params.JsonPath,
+		"entities", entityHits,
+		"matchCount", total)
 }
 
 // restorePIIInResponse handles PII restoration in responses when redactPII is disabled

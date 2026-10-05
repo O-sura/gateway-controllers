@@ -280,11 +280,13 @@ func (p *RegexGuardrailPolicy) validatePayload(payload []byte, params RegexGuard
 	}
 
 	if !validationPassed {
-		slog.Debug("RegexGuardrail: Validation failed", "regex", params.Regex, "matched", matched, "invert", params.Invert, "isResponse", isResponse)
+		slog.Debug("RegexGuardrail: Validation failed", "regex", params.Regex, "jsonPath", params.JsonPath, "matched", matched,
+			"matchCount", debugMatchCount(compiledRegex, extractedValue), "invert", params.Invert, "isResponse", isResponse)
 		return p.buildErrorResponse("Violated regular expression: "+params.Regex, nil, isResponse, params.ShowAssessment)
 	}
 
-	slog.Debug("RegexGuardrail: Validation passed", "regex", params.Regex, "matched", matched, "invert", params.Invert, "isResponse", isResponse)
+	slog.Debug("RegexGuardrail: Validation passed", "regex", params.Regex, "jsonPath", params.JsonPath, "matched", matched,
+		"matchCount", debugMatchCount(compiledRegex, extractedValue), "invert", params.Invert, "isResponse", isResponse)
 	if isResponse {
 		return policy.DownstreamResponseModifications{}
 	}
@@ -390,11 +392,29 @@ func (p *RegexGuardrailPolicy) OnResponseBodyChunk(ctx context.Context, respCtx 
 
 	if violated {
 		slog.Debug("RegexGuardrail: streaming validation failed",
-			"regex", rp.Regex, "invert", rp.Invert, "chunkIndex", chunk.Index)
+			"regex", rp.Regex, "jsonPath", rp.StreamingJsonPath, "matched", matched,
+			"matchCount", debugMatchCount(compiledRegex, accumulated), "invert", rp.Invert, "chunkIndex", chunk.Index)
 		return policy.TerminateResponseChunk{Body: p.buildSSEErrorEvent(rp)}
 	}
 
+	if isDone {
+		slog.Debug("RegexGuardrail: streaming validation passed",
+			"regex", rp.Regex, "jsonPath", rp.StreamingJsonPath, "matched", matched,
+			"matchCount", debugMatchCount(compiledRegex, accumulated), "invert", rp.Invert, "chunkIndex", chunk.Index)
+	}
+
 	return policy.ForwardResponseChunk{}
+}
+
+// debugMatchCount returns how many times re matches s, for debug logging.
+// Counting scans the whole input, unlike MatchString which stops at the first
+// match, so it is skipped when debug logging is disabled. Only the count is
+// logged — never the matched text, which is user or LLM content.
+func debugMatchCount(re *regexp.Regexp, s string) int {
+	if !slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+		return 0
+	}
+	return len(re.FindAllStringIndex(s, -1))
 }
 
 // isSSEChunk reports whether s looks like SSE data (has at least one "data: " or "event:" line).
